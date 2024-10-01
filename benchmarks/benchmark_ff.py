@@ -51,7 +51,6 @@ def read_json_input(file_path: str) -> List[Dict[str, Any]]:
 
 async def get_request(
     input_requests: List[Dict[str, Any]],
-    request_rate: float,
     start_time: float,
 ) -> AsyncGenerator[Tuple[str, int, int, float], None]:
     for request in input_requests:
@@ -64,11 +63,6 @@ async def get_request(
         input_len = request['input_length']
         output_len = request['output_length']
         yield prompt, input_len, output_len, request['slo_ratio']
-
-        if request_rate != float("inf"):
-            # Sample the request interval from the exponential distribution
-            interval = np.random.exponential(1.0 / request_rate)
-            await asyncio.sleep(interval)
 
 
 def calculate_metrics(
@@ -132,7 +126,6 @@ async def benchmark(
     logprobs: Optional[int],
     best_of: int,
     use_beam_search: bool,
-    request_rate: float,
     disable_tqdm: bool,
     profile: bool,
     baseline_latency_per_token: float,  
@@ -182,13 +175,13 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    print(f"Traffic request rate: {request_rate}")
+    print("Starting main benchmark run...")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
-    async for prompt, input_len, output_len, slo_ratio in get_request(input_requests, request_rate, benchmark_start_time):
+    async for prompt, input_len, output_len, slo_ratio in get_request(input_requests, benchmark_start_time):
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=prompt,
@@ -286,7 +279,6 @@ def main(args: argparse.Namespace):
             logprobs=args.logprobs,
             best_of=args.best_of,
             use_beam_search=args.use_beam_search,
-            request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             baseline_latency_per_token=args.baseline_latency_per_token, 
@@ -405,7 +397,7 @@ if __name__ == "__main__":
         "--request-rate",
         type=float,
         default=float("inf"),
-        help="Number of requests per second. If this is inf, then all the requests are sent at time 0.",
+        help="Number of requests per second. If this is inf, then all the requests are sent at time 0. temporarily ignored as this script is customized for ff benchmarking input file format.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
