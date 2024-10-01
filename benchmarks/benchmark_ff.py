@@ -88,13 +88,19 @@ def calculate_metrics(
     latencies = []
     for i, output in enumerate(outputs):
         if output.success:
-            input_tokens = input_requests[i]['input_length']
+            request = input_requests[i]
+            input_tokens = request['input_length']
             output_tokens = len(output.generated_text.split())
-            expected_latency = input_requests[i]['slo_ratio'] * baseline_latency_per_token * (input_tokens + output_tokens)
-            if output.latency <= expected_latency:
+            total_tokens = input_tokens + output_tokens
+            
+            decode_time = output.latency - (input_tokens * baseline_latency_per_token)
+            
+            slo_target = request['slo_ratio'] * baseline_latency_per_token * output_tokens * 1000  
+            if decode_time * 1000 <= slo_target:  
                 slo_attained += 1
-                slo_output_tokens += output_tokens
+                slo_output_tokens += total_tokens
             latencies.append(output.latency)
+
 
     metrics = BenchmarkMetrics(
         completed=completed,
@@ -115,7 +121,6 @@ def calculate_metrics(
     )
 
     return metrics
-
 
 async def benchmark(
     backend: str,
