@@ -75,9 +75,9 @@ def calculate_metrics(
     input_requests: List[Dict[str, Any]],
     outputs: List[RequestFuncOutput],
     dur_s: float,
+    BASELINE_LATENCY_PER_TOKEN = 0.1  
 ) -> BenchmarkMetrics:
-    BASELINE_LATENCY_PER_TOKEN = 0.1  # Adjust this based on your model's performance
-
+    
     completed = sum(1 for output in outputs if output.success)
     total_requests = len(input_requests)
     total_input_tokens = sum(request['input_length'] for request in input_requests)
@@ -90,7 +90,7 @@ def calculate_metrics(
         if output.success:
             input_tokens = input_requests[i]['input_length']
             output_tokens = len(output.generated_text.split())
-            expected_latency = input_requests[i]['slo_ratio'] * BASELINE_LATENCY_PER_TOKEN * (input_tokens + output_tokens)
+            expected_latency = input_requests[i]['slo_ratio'] * baseline_latency_per_token * (input_tokens + output_tokens)
             if output.latency <= expected_latency:
                 slo_attained += 1
                 slo_output_tokens += output_tokens
@@ -130,6 +130,7 @@ async def benchmark(
     request_rate: float,
     disable_tqdm: bool,
     profile: bool,
+    baseline_latency_per_token: float,  
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -225,6 +226,7 @@ async def benchmark(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
+        baseline_latency_per_token=baseline_latency_per_token, 
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
@@ -282,8 +284,9 @@ def main(args: argparse.Namespace):
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
+            baseline_latency_per_token=args.baseline_latency_per_token, 
         ))
-
+    
     # Save config and results to json
     if args.save_result:
         result_json: Dict[str, Any] = {}
@@ -437,6 +440,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Specify the filename to save benchmark json results.",
+    )
+    parser.add_argument(
+        "--baseline-latency-per-token",
+        type=float,
+        default=0.1,
+        help="Baseline latency per token in seconds.",
     )
 
     args = parser.parse_args()
