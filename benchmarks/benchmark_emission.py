@@ -47,13 +47,9 @@ def calculate_metrics(input_requests: List[Dict[str, Any]],
         "total_time": total_time
     }
 
-async def process_request(llm, request, start_time):
-    wait_time = request['emission_time_ms'] / 1000 - (time.perf_counter() - start_time)
-    if wait_time > 0:
-        await asyncio.sleep(wait_time)
-    
-    prompt = request['prompt']
-    max_tokens = request['output_length']
+async def process_batch(llm, batch, start_time):
+    prompts = [request['prompt'] for request in batch]
+    max_tokens = max(request['output_length'] for request in batch)
     
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -62,14 +58,14 @@ async def process_request(llm, request, start_time):
         max_tokens=max_tokens,
     )
     
-    request_start = time.perf_counter()
-    output = llm.generate([prompt], sampling_params)
-    request_end = time.perf_counter()
+    st = time.perf_counter()
+    outputs = llm.generate(prompts, sampling_params)
+    end = time.perf_counter()
     
-    return {
-        "generated_text": output[0].outputs[0].text,
-        "latency": request_end - request_start
-    }
+    return [{
+        "generated_text": output.outputs[0].text,
+        "latency": end - st
+    } for output in outputs]
 
 async def main(args: argparse.Namespace):
     print(args)
@@ -87,11 +83,35 @@ async def main(args: argparse.Namespace):
     )
 
     input_requests = read_json_input(args.input_file)
+    input_requests.sort(key=lambda x: x['emission_time_ms'])  # Sort by emission time
+
+    # Warm-up phase
+    print("Warming up...")
+    dummy_prompt = "This is a dummy prompt for warm-up."
+    dummy_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=10)
+    for _ in range(5):
+        llm.generate([dummy_prompt], dummy_params)
 
     start_time = time.perf_counter()
+    outputs = []
+    current_batch = []
+    last_emission_time = 0
 
-    tasks = [process_request(llm, request, start_time) for request in input_requests]
-    outputs = await asyncio.gather(*tasks)
+    for request in tqdm(input_requests, desc="Processing requests"):
+        # Wait until the emission time
+        wait_time = (request['emission_time_ms'] - last_emission_time) / 1000
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        
+        current_batch.append(request)
+        
+        # Process the batch if it's full or if it's the last request
+        if len(current_batch) == args.batch_size or request == input_requests[-1]:
+            batch_outputs = await process_batch(llm, current_batch, start_time)
+            outputs.extend(batch_outputs)
+            current_batch = []
+        
+        last_emission_time = request['emission_time_ms']
 
     end_time = time.perf_counter()
     total_time = end_time - start_time
@@ -124,6 +144,7 @@ if __name__ == '__main__':
                         help='Path to save the results in JSON format')
     parser.add_argument('--baseline-latency-per-token', type=float, default=0.1,
                         help='Baseline latency per token in seconds')
+    parser.add_argument('--batch-size', type=int, default=8, help='Maximum batch size for processing requests')
     
     args = parser.parse_args()
     asyncio.run(main(args))
