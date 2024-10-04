@@ -9,6 +9,7 @@ from functools import cached_property, reduce
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union, cast
+import time
 
 import msgspec
 import torch
@@ -676,6 +677,8 @@ class SequenceGroup:
         self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
+        self.start_time = time.time()
+        self.end_time = None
 
         self.sampling_params = sampling_params
         self.metrics = RequestMetrics(arrival_time=arrival_time,
@@ -694,6 +697,9 @@ class SequenceGroup:
         self.priority = priority
 
         self.cached_request_output = None
+        
+    def set_finished_time(self, finished_time: Optional[float] = None):
+        self.end_time = finished_time or time.time()
 
     @property
     def prompt(self) -> Optional[str]:

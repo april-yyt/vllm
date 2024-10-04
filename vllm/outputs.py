@@ -101,6 +101,8 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -112,6 +114,15 @@ class RequestOutput:
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+        self.start_time = start_time or time.time()
+        self.end_time = end_time
+        
+    @property
+    def latency(self) -> float:
+        """Calculate the latency of the request in seconds."""
+        if self.start_time is None or self.end_time is None:
+            return 0.0
+        return self.end_time - self.start_time
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup,
@@ -240,7 +251,7 @@ class RequestOutput:
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
                      prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids)
+                     encoder_prompt_token_ids, seq_group.start_time, seq_group.end_time)
 
         if use_cache:
             request_output = seq_group.cached_request_output
@@ -250,6 +261,7 @@ class RequestOutput:
             request_output = cls(*init_args)
 
         return request_output
+
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "

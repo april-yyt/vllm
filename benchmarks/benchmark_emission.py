@@ -4,11 +4,11 @@ import time
 import asyncio
 from typing import List, Dict, Any
 
-import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import DEVICE_OPTIONS
+from vllm.outputs import RequestOutput
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
@@ -17,20 +17,20 @@ def read_json_input(file_path: str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 def calculate_metrics(input_requests: List[Dict[str, Any]], 
-                      outputs: List[Dict[str, Any]], 
+                      outputs: List[RequestOutput], 
                       total_time: float,
-                      baseline_latency_per_token: float = 0.1) -> Dict[str, float]:
+                      baseline_latency_per_token: float) -> Dict[str, float]:
     total_requests = len(input_requests)
     slo_attained = 0
     slo_output_tokens = 0
     total_output_tokens = 0
 
     for request, output in zip(input_requests, outputs):
-        input_tokens = request['input_length']
-        output_tokens = len(output['generated_text'].split())
+        input_tokens = len(output.prompt_token_ids)
+        output_tokens = sum(len(completion.token_ids) for completion in output.outputs)
         total_output_tokens += output_tokens
         
-        decode_time = output['latency'] - (input_tokens * baseline_latency_per_token)
+        decode_time = output.latency - (input_tokens * baseline_latency_per_token)
         slo_target = request['slo_ratio'] * baseline_latency_per_token * output_tokens * 1000
         
         if decode_time * 1000 <= slo_target:
@@ -46,26 +46,6 @@ def calculate_metrics(input_requests: List[Dict[str, Any]],
         "total_output_tokens": total_output_tokens,
         "total_time": total_time
     }
-
-async def process_batch(llm, batch, start_time):
-    prompts = [request['prompt'] for request in batch]
-    max_tokens = max(request['output_length'] for request in batch)
-    
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        ignore_eos=True,
-        max_tokens=max_tokens,
-    )
-    
-    st = time.perf_counter()
-    outputs = llm.generate(prompts, sampling_params)
-    end = time.perf_counter()
-    
-    return [{
-        "generated_text": output.outputs[0].text,
-        "latency": end - st
-    } for output in outputs]
 
 async def main(args: argparse.Namespace):
     print(args)
@@ -89,12 +69,11 @@ async def main(args: argparse.Namespace):
     print("Warming up...")
     dummy_prompt = "This is a dummy prompt for warm-up."
     dummy_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=10)
-    for _ in range(5):
-        llm.generate([dummy_prompt], dummy_params)
+    llm.generate([dummy_prompt] * 5, sampling_params=dummy_params)
 
     start_time = time.perf_counter()
     outputs = []
-    current_batch = []
+    batch = []
     last_emission_time = 0
 
     for request in tqdm(input_requests, desc="Processing requests"):
@@ -103,13 +82,24 @@ async def main(args: argparse.Namespace):
         if wait_time > 0:
             await asyncio.sleep(wait_time)
         
-        current_batch.append(request)
+        batch.append(request)
         
         # Process the batch if it's full or if it's the last request
-        if len(current_batch) == args.batch_size or request == input_requests[-1]:
-            batch_outputs = await process_batch(llm, current_batch, start_time)
+        if len(batch) == args.batch_size or request == input_requests[-1]:
+            prompts = [req['prompt'] for req in batch]
+            max_tokens = max(req['output_length'] for req in batch)
+            
+            sampling_params = SamplingParams(
+                temperature=0.0,
+                top_p=1.0,
+                ignore_eos=True,
+                max_tokens=max_tokens,
+            )
+            
+            batch_outputs = llm.generate(prompts, sampling_params=sampling_params)
             outputs.extend(batch_outputs)
-            current_batch = []
+            
+            batch = []
         
         last_emission_time = request['emission_time_ms']
 
@@ -142,9 +132,9 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default="cuda", choices=DEVICE_OPTIONS)
     parser.add_argument('--output-json', type=str, default='vllm_results.json', 
                         help='Path to save the results in JSON format')
-    parser.add_argument('--baseline-latency-per-token', type=float, default=0.1,
-                        help='Baseline latency per token in seconds')
     parser.add_argument('--batch-size', type=int, default=8, help='Maximum batch size for processing requests')
+    parser.add_argument('--baseline-latency-per-token', type=float, required=True,
+                        help='Baseline latency per token in seconds', default=0.043)
     
     args = parser.parse_args()
     asyncio.run(main(args))
