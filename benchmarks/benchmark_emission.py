@@ -47,7 +47,7 @@ def calculate_metrics(input_requests: List[Dict[str, Any]],
         "total_time": total_time
     }
 
-async def process_request(llm, request, sampling_params, start_time):
+async def process_request(llm, request, start_time):
     wait_time = request['emission_time_ms'] / 1000 - (time.perf_counter() - start_time)
     if wait_time > 0:
         await asyncio.sleep(wait_time)
@@ -55,7 +55,12 @@ async def process_request(llm, request, sampling_params, start_time):
     prompt = request['prompt']
     max_tokens = request['output_length']
     
-    sampling_params.max_tokens = max_tokens
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        ignore_eos=True,
+        max_tokens=max_tokens,
+    )
     
     request_start = time.perf_counter()
     output = llm.generate([prompt], sampling_params)
@@ -83,16 +88,9 @@ async def main(args: argparse.Namespace):
 
     input_requests = read_json_input(args.input_file)
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        ignore_eos=True,
-        max_tokens=args.max_output_len,
-    )
-
     start_time = time.perf_counter()
 
-    tasks = [process_request(llm, request, sampling_params, start_time) for request in input_requests]
+    tasks = [process_request(llm, request, start_time) for request in input_requests]
     outputs = await asyncio.gather(*tasks)
 
     end_time = time.perf_counter()
@@ -112,11 +110,10 @@ async def main(args: argparse.Namespace):
 if __name__ == '__main__':
     parser = FlexibleArgumentParser(description='Benchmark using emission.json input file')
     parser.add_argument('--input-file', type=str, required=True, help='Path to emission.json input file')
-    parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument('--model', type=str, default='meta-llama/Llama-2-7b-hf')
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization', '-q', choices=[*QUANTIZATION_METHODS, None], default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--max-output-len', type=int, default=256)
     parser.add_argument('--trust-remote-code', action='store_true')
     parser.add_argument('--max-model-len', type=int, default=None)
     parser.add_argument('--dtype', type=str, default='auto', 
