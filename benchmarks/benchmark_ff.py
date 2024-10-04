@@ -87,13 +87,13 @@ def calculate_metrics(
             output_tokens = len(output.generated_text.split())
             total_tokens = input_tokens + output_tokens
             
-            decode_time = output.latency - (input_tokens * baseline_latency_per_token)
+            decode_time = output.ttft - (input_tokens * baseline_latency_per_token)
             
             slo_target = request['slo_ratio'] * baseline_latency_per_token * output_tokens * 1000  
             if decode_time * 1000 <= slo_target:  
                 slo_attained += 1
                 slo_output_tokens += total_tokens
-            latencies.append(output.latency)
+            latencies.append(output.ttft)
 
 
     metrics = BenchmarkMetrics(
