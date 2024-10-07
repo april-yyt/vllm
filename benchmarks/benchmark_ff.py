@@ -53,11 +53,14 @@ async def get_request(
     input_requests: List[Dict[str, Any]],
     start_time: float,
 ) -> AsyncGenerator[Tuple[str, int, int, float], None]:
+    last_emission_time = 0.0
     for request in input_requests:
-        # Wait until the emission time
-        wait_time = request['emission_time_ms'] / 1000 - (time.time() - start_time)
+        # Calculate the wait time as the difference between current and last emission time
+        wait_time = (request['emission_time_ms'] - last_emission_time) / 1000
         if wait_time > 0:
             await asyncio.sleep(wait_time)
+
+        last_emission_time = request['emission_time_ms']
 
         prompt = request['prompt']
         input_len = request['input_length']
@@ -87,7 +90,7 @@ def calculate_metrics(
             output_tokens = len(output.generated_text.split())
             total_tokens = input_tokens + output_tokens
             
-            decode_time = output.ttft - (input_tokens * baseline_latency_per_token)
+            decode_time = output.latency - output.ttft
             
             slo_target = request['slo_ratio'] * baseline_latency_per_token * output_tokens * 1000  
             if decode_time * 1000 <= slo_target:  
