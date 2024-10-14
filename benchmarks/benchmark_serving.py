@@ -28,7 +28,6 @@ import json
 import os
 import random
 import time
-import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
@@ -53,255 +52,113 @@ except ImportError:
 @dataclass
 class BenchmarkMetrics:
     completed: int
-    total_input: int
-    total_output: int
+    total_requests: int
+    slo_attained: int
+    total_input_tokens: int
+    total_output_tokens: int
+    slo_output_tokens: int
+    benchmark_duration: float
     request_throughput: float
-    input_throughput: float
     output_throughput: float
-    mean_ttft_ms: float
-    median_ttft_ms: float
-    std_ttft_ms: float
-    p99_ttft_ms: float
-    mean_tpot_ms: float
-    median_tpot_ms: float
-    std_tpot_ms: float
-    p99_tpot_ms: float
-    mean_itl_ms: float
-    median_itl_ms: float
-    std_itl_ms: float
-    p99_itl_ms: float
+    total_token_throughput: float
+    slo_attainment: float
+    goodput: float
+    min_latency: float
+    max_latency: float
+    avg_latency: float
+    avg_tpots: dict
 
 
-def sample_sharegpt_requests(
-    dataset_path: str,
-    num_requests: int,
-    tokenizer: PreTrainedTokenizerBase,
-    fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, int, int]]:
-    if fixed_output_len is not None and fixed_output_len < 4:
-        raise ValueError("output_len too small")
-    # Load the dataset.
-    with open(dataset_path) as f:
-        dataset = json.load(f)
-    # Filter out the conversations with less than 2 turns.
-    dataset = [data for data in dataset if len(data["conversations"]) >= 2]
-    # Only keep the first two turns of each conversation.
-    dataset = [(data["conversations"][0]["value"],
-                data["conversations"][1]["value"]) for data in dataset]
-
-    # Shuffle the dataset.
-    random.shuffle(dataset)
-
-    # Filter out sequences that are too long or too short
-    filtered_dataset: List[Tuple[str, int, int]] = []
-    for i in range(len(dataset)):
-        if len(filtered_dataset) == num_requests:
-            break
-
-        # Tokenize the prompts and completions.
-        prompt = dataset[i][0]
-        prompt_token_ids = tokenizer(prompt).input_ids
-        completion = dataset[i][1]
-        completion_token_ids = tokenizer(completion).input_ids
-        prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
-            # Prune too short sequences.
-            continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
-            # Prune too long sequences.
-            continue
-        filtered_dataset.append((prompt, prompt_len, output_len))
-
-    return filtered_dataset
-
-
-def sample_sonnet_requests(
-    dataset_path: str,
-    num_requests: int,
-    input_len: int,
-    output_len: int,
-    prefix_len: int,
-    tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, str, int, int]]:
-    assert (
-        input_len > prefix_len
-    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
-
-    # Load the dataset.
-    with open(dataset_path) as f:
-        poem_lines = f.readlines()
-
-    # Tokenize the poem lines.
-    poem_token_ids = tokenizer(poem_lines).input_ids
-    average_poem_len = sum(
-        len(token_ids) for token_ids in poem_token_ids) / len(poem_token_ids)
-
-    # Base prefix for all requests.
-    base_prompt = "Pick as many lines as you can from these poem lines:\n"
-    base_message = [{
-        "role": "user",
-        "content": base_prompt,
-    }]
-    base_prompt_formatted = tokenizer.apply_chat_template(
-        base_message, add_generation_prompt=True, tokenize=False)
-    base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
-
-    assert (
-        input_len > base_prompt_offset
-    ), f"Please set 'args.sonnet-input-len' higher than {base_prompt_offset}."
-    num_input_lines = round(
-        (input_len - base_prompt_offset) / average_poem_len)
-
-    # First approximately `prefix_len` number of tokens in the
-    # prompt are fixed poem lines.
-    assert (
-        prefix_len > base_prompt_offset
-    ), f"Please set 'args.sonnet-prefix-len' higher than {base_prompt_offset}."
-
-    num_prefix_lines = round(
-        (prefix_len - base_prompt_offset) / average_poem_len)
-    prefix_lines = poem_lines[:num_prefix_lines]
-
-    # Sample the rest of lines per request.
-    sampled_requests: List[Tuple[str, int, int]] = []
-    for _ in range(num_requests):
-        sampled_lines = "".join(
-            prefix_lines +
-            random.sample(poem_lines, num_input_lines - num_prefix_lines))
-
-        prompt = f"{base_prompt}{sampled_lines}"
-        message = [
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ]
-        prompt_formatted = tokenizer.apply_chat_template(
-            message, add_generation_prompt=True, tokenize=False)
-        prompt_len = len(tokenizer(prompt_formatted).input_ids)
-        sampled_requests.append(
-            (prompt, prompt_formatted, prompt_len, output_len))
-
-    return sampled_requests
-
-
-def sample_random_requests(
-        input_len: int, output_len: int, num_prompts: int, range_ratio: float,
-        tokenizer: PreTrainedTokenizerBase) -> List[Tuple[str, int, int]]:
-
-    input_lens = np.random.randint(
-        int(input_len * range_ratio),
-        input_len + 1,
-        size=num_prompts,
-    )
-    output_lens = np.random.randint(
-        int(output_len * range_ratio),
-        output_len + 1,
-        size=num_prompts,
-    )
-    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
-    input_requests = []
-    for i in range(num_prompts):
-        prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size
-                                   for j in range(input_lens[i])])
-        input_requests.append(
-            (prompt, int(input_lens[i]), int(output_lens[i])))
-
-    return input_requests
+def read_json_input(file_path: str) -> List[Dict[str, Any]]:
+    with open(file_path, 'r') as f:
+        return json.load(f)
 
 
 async def get_request(
-    input_requests: List[Tuple[str, int, int]],
-    request_rate: float,
-) -> AsyncGenerator[Tuple[str, int, int], None]:
-    input_requests = iter(input_requests)
+    input_requests: List[Dict[str, Any]],
+    start_time: float,
+) -> AsyncGenerator[Tuple[str, int, int, float], None]:
+    last_emission_time = 0.0
     for request in input_requests:
-        yield request
+        # Calculate the wait time as the difference between current and last emission time
+        wait_time = (request['emission_time_ms'] - last_emission_time) / 1000
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
 
-        if request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to wait.
-            continue
+        last_emission_time = request['emission_time_ms']
 
-        # Sample the request interval from the exponential distribution.
-        interval = np.random.exponential(1.0 / request_rate)
-        # The next request will be sent after the interval.
-        await asyncio.sleep(interval)
+        prompt = request['prompt']
+        input_len = request['input_length']
+        output_len = request['output_length']
+        yield prompt, input_len, output_len, request['slo_ratio']
 
 
 def calculate_metrics(
-    input_requests: List[Tuple[str, int, int]],
+    input_requests: List[Dict[str, Any]],
     outputs: List[RequestFuncOutput],
     dur_s: float,
-    tokenizer: PreTrainedTokenizerBase,
-) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens: List[int] = []
-    total_input = 0
-    completed = 0
-    itls: List[float] = []
-    tpots: List[float] = []
-    ttfts: List[float] = []
-    for i in range(len(outputs)):
-        if outputs[i].success:
-            # We use the tokenizer to count the number of output tokens for all
-            # serving backends instead of looking at len(outputs[i].itl) since
-            # multiple output tokens may be bundled together
-            # Note : this may inflate the output token count slightly
-            output_len = len(
-                tokenizer(outputs[i].generated_text,
-                          add_special_tokens=False).input_ids)
-            actual_output_lens.append(output_len)
-            total_input += input_requests[i][1]
-            if output_len > 1:
-                tpots.append(
-                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
-            itls += outputs[i].itl
-            ttfts.append(outputs[i].ttft)
-            completed += 1
-        else:
-            actual_output_lens.append(0)
+    baseline_latency_per_token = 0.1  
+) -> BenchmarkMetrics:
+    
+    completed = sum(1 for output in outputs if output.success)
+    total_requests = len(input_requests)
+    total_input_tokens = sum(request['input_length'] for request in input_requests)
+    total_output_tokens = sum(len(output.generated_text.split()) for output in outputs if output.success)
+    
+    slo_attained = 0
+    slo_output_tokens = 0
+    latencies = []
+    avg_tpots = {}
+    for i, output in enumerate(outputs):
+        if output.success:
+            request = input_requests[i]
+            input_tokens = request['input_length']
+            output_tokens = len(output.itl)
+            
+            decode_time = output.latency - output.ttft
+            tpot = decode_time / output_tokens
+            if request['slo_ratio'] not in avg_tpots:
+                avg_tpots[request['slo_ratio']] = []
+            avg_tpots[request['slo_ratio']].append(tpot)
+            
+            slo_target = request['slo_ratio'] * baseline_latency_per_token * output_tokens * 1000  
+            if decode_time * 1000 <= slo_target:  
+                slo_attained += 1
+                slo_output_tokens += output_tokens
+            latencies.append(output.ttft)
 
-    if completed == 0:
-        warnings.warn(
-            "All requests failed. This is likely due to a misconfiguration "
-            "on the benchmark arguments.",
-            stacklevel=2)
+
     metrics = BenchmarkMetrics(
         completed=completed,
-        total_input=total_input,
-        total_output=sum(actual_output_lens),
+        total_requests=total_requests,
+        slo_attained=slo_attained,
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        slo_output_tokens=slo_output_tokens,
+        benchmark_duration=dur_s,
         request_throughput=completed / dur_s,
-        input_throughput=total_input / dur_s,
-        output_throughput=sum(actual_output_lens) / dur_s,
-        mean_ttft_ms=np.mean(ttfts or 0) *
-        1000,  # ttfts is empty if streaming is not supported by backend
-        median_ttft_ms=np.median(ttfts or 0) * 1000,
-        std_ttft_ms=np.std(ttfts or 0) * 1000,
-        p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
-        mean_tpot_ms=np.mean(tpots or 0) * 1000,
-        median_tpot_ms=np.median(tpots or 0) * 1000,
-        std_tpot_ms=np.std(tpots or 0) * 1000,
-        p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
-        mean_itl_ms=np.mean(itls or 0) * 1000,
-        median_itl_ms=np.median(itls or 0) * 1000,
-        std_itl_ms=np.std(itls or 0) * 1000,
-        p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
+        output_throughput=total_output_tokens / dur_s,
+        total_token_throughput=(total_input_tokens + total_output_tokens) / dur_s,
+        slo_attainment=slo_attained / total_requests,
+        goodput=slo_output_tokens / dur_s,
+        min_latency=min(latencies) if latencies else 0,
+        max_latency=max(latencies) if latencies else 0,
+        avg_latency=sum(latencies) / len(latencies) if latencies else 0,
+        avg_tpots={k: sum(v) / len(v) for k, v in avg_tpots.items()}
     )
 
-    return metrics, actual_output_lens
-
+    return metrics
 
 async def benchmark(
     backend: str,
     api_url: str,
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: List[Tuple[str, int, int]],
+    input_requests: List[Dict[str, Any]],
     best_of: int,
     use_beam_search: bool,
-    request_rate: float,
     disable_tqdm: bool,
+    baseline_latency_per_token: float,  
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -309,12 +166,14 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len = input_requests[0]
+    test_prompt = input_requests[0]['prompt']
+    test_input_len = input_requests[0]['input_length']
+    test_output_len = input_requests[0]['output_length']
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_prompt,
         api_url=api_url,
-        prompt_len=test_prompt_len,
+        prompt_len=test_input_len,
         output_len=test_output_len,
         best_of=best_of,
         use_beam_search=use_beam_search,
@@ -326,19 +185,17 @@ async def benchmark(
             f"are correctly specified. Error: {test_output.error}")
     else:
         print("Initial test run completed. Starting main benchmark run...")
-    print(f"Traffic request rate: {request_rate}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate):
-        prompt, prompt_len, output_len = request
+    async for prompt, input_len, output_len, slo_ratio in get_request(input_requests, benchmark_start_time):
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=prompt,
             api_url=api_url,
-            prompt_len=prompt_len,
+            prompt_len=input_len,
             output_len=output_len,
             best_of=best_of,
             use_beam_search=use_beam_search,
@@ -354,73 +211,32 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    metrics, actual_output_lens = calculate_metrics(
+    metrics = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
-        tokenizer=tokenizer,
+        baseline_latency_per_token=baseline_latency_per_token, 
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
-    print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
-    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
-                                    metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):",
-                                    metrics.input_throughput))
-    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
-                                    metrics.output_throughput))
-    print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
-    print("{:<40} {:<10.2f}".format("Median TTFT (ms):",
-                                    metrics.median_ttft_ms))
-    print("{:<40} {:<10.2f}".format("P99 TTFT (ms):", metrics.p99_ttft_ms))
-    print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
-                               n=50,
-                               c='-'))
-    print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
-    print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
-                                    metrics.median_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
-    print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
-    print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
-    print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
+    print("{:<40} {:<10}".format("Total requests:", metrics.total_requests))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", metrics.benchmark_duration))
+    print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input_tokens))
+    print("{:<40} {:<10}".format("Total output tokens:", metrics.total_output_tokens))
+    print("{:<40} {:<10.2f}".format("Request throughput (req/s):", metrics.request_throughput))
+    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):", metrics.output_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):", metrics.total_token_throughput))
+    print("{:<40} {:<10.2f}".format("SLO Attainment:", metrics.slo_attainment))
+    print("{:<40} {:<10.2f}".format("Goodput (tok/s):", metrics.goodput))
+    print("{:<40} {:<10.2f}".format("Min Latency (s):", metrics.min_latency))
+    print("{:<40} {:<10.2f}".format("Max Latency (s):", metrics.max_latency))
+    print("{:<40} {:<10.2f}".format("Avg Latency (s):", metrics.avg_latency))
+    print("{:<40} {}".format("Avg TPOTs (ms/token):", metrics.avg_tpots))
+
     print("=" * 50)
 
-    result = {
-        "duration": benchmark_duration,
-        "completed": metrics.completed,
-        "total_input_tokens": metrics.total_input,
-        "total_output_tokens": metrics.total_output,
-        "request_throughput": metrics.request_throughput,
-        "input_throughput": metrics.input_throughput,
-        "output_throughput": metrics.output_throughput,
-        "mean_ttft_ms": metrics.mean_ttft_ms,
-        "median_ttft_ms": metrics.median_ttft_ms,
-        "std_ttft_ms": metrics.std_ttft_ms,
-        "p99_ttft_ms": metrics.p99_ttft_ms,
-        "mean_tpot_ms": metrics.mean_tpot_ms,
-        "median_tpot_ms": metrics.median_tpot_ms,
-        "std_tpot_ms": metrics.std_tpot_ms,
-        "p99_tpot_ms": metrics.p99_tpot_ms,
-        "mean_itl_ms": metrics.mean_itl_ms,
-        "median_itl_ms": metrics.median_itl_ms,
-        "std_itl_ms": metrics.std_itl_ms,
-        "p99_itl_ms": metrics.p99_itl_ms,
-        "input_lens": [output.prompt_len for output in outputs],
-        "output_lens": actual_output_lens,
-        "ttfts": [output.ttft for output in outputs],
-        "itls": [output.itl for output in outputs],
-        "generated_texts": [output.generated_text for output in outputs],
-        "errors": [output.error for output in outputs],
-    }
-    return result
-
+    return metrics
 
 def main(args: argparse.Namespace):
     print(args)
@@ -439,68 +255,8 @@ def main(args: argparse.Namespace):
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
 
-    if args.dataset is not None:
-        warnings.warn(
-            "The '--dataset' argument will be deprecated in the next "
-            "release. Please use '--dataset-name' and "
-            "'--dataset-path' in the future runs.",
-            stacklevel=2)
-        input_requests = sample_sharegpt_requests(
-            dataset_path=args.dataset,
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            fixed_output_len=args.sharegpt_output_len,
-        )
-
-    elif args.dataset_name == "sharegpt":
-        input_requests = sample_sharegpt_requests(
-            dataset_path=args.dataset_path,
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            fixed_output_len=args.sharegpt_output_len,
-        )
-
-    elif args.dataset_name == "sonnet":
-        # Do not format the prompt, pass to message directly
-        if args.backend == "openai-chat":
-            input_requests = sample_sonnet_requests(
-                dataset_path=args.dataset_path,
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-            )
-            input_requests = [(prompt, prompt_len, output_len)
-                              for prompt, prompt_formatted, prompt_len,
-                              output_len in input_requests]
-        else:
-            assert (
-                tokenizer.chat_template or tokenizer.default_chat_template
-            ), "Tokenizer/model must have chat template for sonnet dataset."
-            input_requests = sample_sonnet_requests(
-                dataset_path=args.dataset_path,
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-            )
-            input_requests = [(prompt_formatted, prompt_len, output_len)
-                              for prompt, prompt_formatted, prompt_len,
-                              output_len in input_requests]
-
-    elif args.dataset_name == "random":
-        input_requests = sample_random_requests(
-            input_len=args.random_input_len,
-            output_len=args.random_output_len,
-            num_prompts=args.num_prompts,
-            range_ratio=args.random_range_ratio,
-            tokenizer=tokenizer,
-        )
-
-    else:
-        raise ValueError(f"Unknown dataset: {args.dataset_name}")
+    # Read the input file
+    input_requests = read_json_input(args.input_file)
 
     benchmark_result = asyncio.run(
         benchmark(
@@ -511,8 +267,8 @@ def main(args: argparse.Namespace):
             input_requests=input_requests,
             best_of=args.best_of,
             use_beam_search=args.use_beam_search,
-            request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
+            baseline_latency_per_token=args.baseline_latency_per_token, 
         ))
 
     # Save config and results to json
@@ -527,7 +283,7 @@ def main(args: argparse.Namespace):
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
         result_json["use_beam_search"] = args.use_beam_search
-        result_json["num_prompts"] = args.num_prompts
+        result_json["num_prompts"] = len(input_requests)
 
         # Metadata
         if args.metadata:
@@ -544,8 +300,17 @@ def main(args: argparse.Namespace):
         result_json["request_rate"] = (
             args.request_rate if args.request_rate < float("inf") else "inf")
 
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
+        # Benchmark results
+        result_json["completed_requests"] = benchmark_result.completed
+        result_json["total_requests"] = benchmark_result.total_requests
+        result_json["benchmark_duration"] = benchmark_result.benchmark_duration
+        result_json["request_throughput"] = benchmark_result.request_throughput
+        result_json["output_throughput"] = benchmark_result.output_throughput
+        result_json["total_token_throughput"] = benchmark_result.total_token_throughput
+        result_json["slo_attainment"] = benchmark_result.slo_attainment
+        result_json["goodput"] = benchmark_result.goodput
+        result_json["avg_latency"] = benchmark_result.avg_latency
+        result_json["avg_tpots"] = benchmark_result.avg_tpots
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
@@ -561,6 +326,12 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput.")
+    parser.add_argument(
+        "--input-file",
+        type=str,
+        required=True,
+        help="Path to the JSON input file containing requests.",
+    )
     parser.add_argument(
         "--backend",
         type=str,
@@ -582,24 +353,6 @@ if __name__ == "__main__":
         help="API endpoint.",
     )
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to the ShareGPT dataset, will be deprecated in the "
-        "next release.",
-    )
-    parser.add_argument(
-        "--dataset-name",
-        type=str,
-        default="sharegpt",
-        choices=["sharegpt", "sonnet", "random"],
-        help="Name of the dataset to benchmark on.",
-    )
-    parser.add_argument("--dataset-path",
-                        type=str,
-                        default=None,
-                        help="Path to the dataset.")
-    parser.add_argument(
         "--model",
         type=str,
         required=True,
@@ -619,60 +372,6 @@ if __name__ == "__main__":
         "returns the best one.",
     )
     parser.add_argument("--use-beam-search", action="store_true")
-    parser.add_argument(
-        "--num-prompts",
-        type=int,
-        default=1000,
-        help="Number of prompts to process.",
-    )
-    parser.add_argument(
-        "--sharegpt-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output length "
-        "from the ShareGPT dataset.")
-    parser.add_argument(
-        "--sonnet-input-len",
-        type=int,
-        default=550,
-        help=
-        "Number of input tokens per request, used only for sonnet dataset.",
-    )
-    parser.add_argument(
-        "--sonnet-output-len",
-        type=int,
-        default=150,
-        help=
-        "Number of output tokens per request, used only for sonnet dataset.",
-    )
-    parser.add_argument(
-        "--sonnet-prefix-len",
-        type=int,
-        default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
-    )
-    parser.add_argument(
-        "--random-input-len",
-        type=int,
-        default=1024,
-        help=
-        "Number of input tokens per request, used only for random sampling.",
-    )
-    parser.add_argument(
-        "--random-output-len",
-        type=int,
-        default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
-    )
-    parser.add_argument(
-        "--random-range-ratio",
-        type=float,
-        default=1.0,
-        help="Range of sampled ratio of input/output length, "
-        "used only for random sampling.",
-    )
     parser.add_argument(
         "--request-rate",
         type=float,
@@ -721,6 +420,12 @@ if __name__ == "__main__":
         "If not specified, results will be saved in "
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
+    )
+    parser.add_argument(
+        "--baseline-latency-per-token",
+        type=float,
+        default=0.1,
+        help="Baseline latency per token in seconds.",
     )
 
     args = parser.parse_args()
