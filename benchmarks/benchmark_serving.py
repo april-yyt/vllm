@@ -116,15 +116,16 @@ def calculate_metrics(
             output_tokens = len(output.itl)
             
             decode_time = output.latency - output.ttft
-            tpot = decode_time / output_tokens
-            if request['slo_ratio'] not in avg_tpots:
-                avg_tpots[request['slo_ratio']] = []
-            avg_tpots[request['slo_ratio']].append(tpot)
-            
-            if tpot <= request['slo_ratio'] * baseline_latency_per_token:
-                slo_attained += 1
-                slo_output_tokens += output_tokens
-            latencies.append(output.ttft)
+            if (output_tokens != 0):
+                tpot = decode_time / output_tokens
+                if request['slo_ratio'] not in avg_tpots:
+                    avg_tpots[request['slo_ratio']] = []
+                avg_tpots[request['slo_ratio']].append(tpot)
+                
+                if tpot <= request['slo_ratio'] * baseline_latency_per_token:
+                    slo_attained += 1
+                    slo_output_tokens += output_tokens
+                latencies.append(output.ttft)
 
 
     metrics = BenchmarkMetrics(
