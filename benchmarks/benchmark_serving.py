@@ -122,7 +122,9 @@ def calculate_metrics(
                     avg_tpots[request['slo_ratio']] = []
                 avg_tpots[request['slo_ratio']].append(tpot)
                 
-                if tpot <= request['slo_ratio'] * baseline_latency_per_token:
+                expected_latency = request['slo_ratio'] * baseline_latency_per_token if request['slo_ratio'] >= 0 else -request['slo_ratio']
+                
+                if tpot <= expected_latency:
                     slo_attained += 1
                     slo_output_tokens += output_tokens
                 latencies.append(output.ttft)
